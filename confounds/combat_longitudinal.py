@@ -5,7 +5,8 @@ from sklearn.utils.validation import (check_array, check_consistent_length,
 from confounds.base import BaseDeconfound
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-#"${PYTHONPATH}:/Users/maxreynolds/Desktop/ConfoundsRepo/"
+import pandas as pd
+#export PYTHONPATH="${PYTHONPATH}:/Users/maxreynolds/Desktop/ConfoundsRepo/"
 
 class LongComBat(BaseDeconfound):
     """ComBat method to remove batch effects."""
@@ -23,7 +24,7 @@ class LongComBat(BaseDeconfound):
     def fit(self,
             in_features,
             batch,
-            subject=None,
+            subject,
             effects_interest=None
             ):
         """
@@ -55,7 +56,8 @@ class LongComBat(BaseDeconfound):
         in_features = check_array(in_features)
         # pdb.set_trace()
         batch = column_or_1d(batch)
-        subject = column_or_1d(subject) if subject else None
+        pdb.set_trace()
+        subject = column_or_1d(subject)
 
         if effects_interest is not None:
             effects_interest = check_array(effects_interest)
@@ -71,7 +73,178 @@ class LongComBat(BaseDeconfound):
                          s=subject
                          )
 
-    def _fit(self, Y, b, X,s):
+    def _fit(self, Y, b, X, s):
+        """max implementation"""
+        b_rename=np.array(['batch_'+str(b_elem) for b_elem in b])
+
+        V = Y.shape[1]
+        # pdb.set_trace()
+        print(V,'features')
+        R = Y.shape[0]
+        print(R, 'measurements')
+
+        predicted = []
+        # pdb.set_trace()
+
+        batch = np.unique(b_rename)
+        batch.sort()
+        batches = [] #index for every observation in a scanner group
+
+        for b_elem in batch:
+            # batches.append(list(df[df['Scanner_Proxy'] == s].index))
+            batches.append(list(np.where(b_rename==b_elem)[0]))
+
+        m = len(batches)
+        ni = np.array([len(x) for x in batches])
+        L = Y.shape[0]
+        # pdb.set_trace()
+        df=pd.DataFrame(data=np.concatenate((X,Y),axis=1),columns=['x'+str(i) for i in range(X.shape[1])]+['y'+str(i) for i in range(Y.shape[1])])
+        df['batch']=np.expand_dims(b_rename,1)
+        # df[['x'+str(i) for i in range(X.shape[1])]+['y'+str(i) for i in range(Y.shape[1])]]=df[['x'+str(i) for i in range(X.shape[1])]+['y'+str(i) for i in range(Y.shape[1])]].astype(np.float)
+        batch_effects = []
+        X_coeffs = []
+        predicted = []
+        sigma_estimates = []
+        intercepts=[]
+        pdb.set_trace()
+        for i in range(V):
+            print(i)
+            term_str=' + '.join(['x'+str(i) for i in range(X.shape[1])]+['batch'])
+            formula = "{} ~ {}".format('y'+str(i),term_str)
+            print(formula)
+            md = smf.mixedlm(formula, df, groups = s)
+            mdf = md.fit(reml = True)
+            intercepts.append(mdf.fe_params.Intercept)
+
+            batchef = mdf.fe_params.filter(regex = 'batch') 
+            pred = mdf.fittedvalues
+            sig = np.sqrt(mdf.scale) #save standard deviation of residuals 
+            X_coeff=mdf.fe_params[['x'+str(i) for i in range(X.shape[1])]]
+            batch_effects.append(batchef) #save scanner effects
+            X_coeffs.append(X_coeff)
+            predicted.append(pred)
+            sigma_estimates.append(sig)
+            
+            if i % 10 == 0:
+                print(i+1, 'of', V, 'features done')
+
+        batch_effects = np.array(batch_effects).T
+        X_coeffs = np.array(X_coeffs).T
+        intercepts = np.array(intercepts)
+        sigmas = np.tile(np.array(sigma_estimates), (df.shape[0],1))
+
+        #calculate gamma1hats
+        #weighted sum of scanner effects for each feature (weighted by #obs in feature)
+        gamma1hat = -np.matmul(np.expand_dims(ni[1:], 0), batch_effects)/L
+
+        batch_effects_adjusted = batch_effects + np.tile(gamma1hat, (batch_effects.shape[0],1))
+        batch_effects_adjusted = np.concatenate((gamma1hat, batch_effects_adjusted), axis=0)
+
+        batch_effects_expanded = np.zeros((L,V))
+
+        for i in range(m):
+            batch_effects_expanded[batches[i]] = np.tile(batch_effects_adjusted[i], (len(batches[i]),1))
+
+        pdb.set_trace()
+        epsilon = np.mean((df[['y'+str(i) for i in range(Y.shape[1])]].values-np.array(predicted).T)**2,axis=0)
+
+        data_std= (df[['y'+str(i) for i in range(Y.shape[1])]] - np.array(predicted).T + batch_effects_expanded) / sigmas
+        
+        gammahat = np.zeros((m, V))
+        delta2hat = np.zeros((m, V))
+        for i in range(m): #for every scanner
+            gammahat[i] = data_std.values[batches[i],].mean(axis=0)
+            delta2hat[i] = np.var(data_std.values[batches[i],], axis=0, ddof=1)
+        
+        gammabar = gammahat.mean(axis = 1)
+        tau2bar = gammahat.var(axis = 1, ddof=1)
+
+        dbar = delta2hat.mean(axis = 1)
+        S2bar = delta2hat.var(axis = 1, ddof=1)
+        lambdabar = (dbar**2 + 2*S2bar)/S2bar
+        thetabar = (dbar**3 + dbar*S2bar)/S2bar
+
+        print('ni',ni.shape)
+        print('tau2bar',tau2bar.shape)
+        print('gammabar',gammabar.shape)
+        print('gammahat',gammahat.shape)
+        print('delta2hat',gammahat.shape)
+
+        gammastarhat0 = (( np.tile(ni,(V,1)).T* np.tile(tau2bar,(V,1)).T *gammahat) + (delta2hat*np.tile(gammabar,(V,1)).T)) / ((np.tile(ni,(V,1)).T* np.tile(tau2bar,(V,1)).T) + delta2hat)
+        gammastarhat_mu_0=((np.tile(ni,(V,1)).T*np.tile(tau2bar,(V,1)).T*gammahat) +(delta2hat*np.tile(gammabar,(V,1)).T)) / (((np.tile(ni,(V,1)).T*np.tile(tau2bar,(V,1)).T) + delta2hat))
+        gammastarhat_sigma_0=1/((np.tile(ni,(V,1)).T*np.tile(tau2bar,(V,1)).T) + delta2hat)/(delta2hat*np.tile(tau2bar,(V,1)).T)
+
+        delta2starhat0=np.zeros((m,V))
+        delta2starhat_alpha0=(np.tile(ni,(V,1)).T/2 + np.tile(lambdabar,(V,1)).T)
+        delta2starhat_beta0=np.zeros((m,V))
+        for i in range(m):
+            zminusgammastarhat2 = ((data_std.loc[batches[i]].values - gammastarhat0[i,])**2).sum(axis=0)
+            delta2starhat0[i] = (thetabar[i]+0.5*zminusgammastarhat2) / (ni[i]/2+lambdabar[i]-1)
+            delta2starhat_beta0[i] = thetabar[i]+0.5*zminusgammastarhat2
+
+        niter=100
+
+
+        gammastarhat=np.zeros((niter,m,V,))
+        gammastarhat[0,:,:]=gammastarhat0
+        gammastarhat_mus=np.zeros((niter,m,V,))
+        gammastarhat_mus[0,:,:]=gammastarhat_mu_0
+        gammastarhat_sigmas=np.zeros((niter,m,V,))
+        gammastarhat_sigmas[0,:,:]=gammastarhat_sigma_0
+        delta2starhat=np.zeros((niter,m,V))
+        delta2starhat[0,:,:]=delta2starhat0
+        delta2starhat_alphas=np.zeros((niter,m,V,))
+        delta2starhat_alphas[0,:,:]=delta2starhat_alpha0
+        delta2starhat_betas=np.zeros((niter,m,V,))
+        delta2starhat_betas[0,:,:]=delta2starhat_beta0
+
+        for b in range(1,niter): 
+            gammastarhat_mu=((np.tile(ni,(V,1)).T*np.tile(tau2bar,(V,1)).T*gammahat) +(delta2starhat[b-1,:,:]*np.tile(gammabar,(V,1)).T)) / (((np.tile(ni,(V,1)).T*np.tile(tau2bar,(V,1)).T) + delta2starhat[b-1,:,:]))
+            gammastarhat_sigma=1/((np.tile(ni,(V,1)).T*np.tile(tau2bar,(V,1)).T) + delta2starhat[b-1,:,:])/(delta2starhat[b-1,:,:]*np.tile(tau2bar,(V,1)).T)
+        #     gammastarhat[b,:,:]=dist.Normal(torch.tensor(gammastarhat_mu), torch.tensor(np.sqrt(gammastarhat_sigma))).sample()
+            gammastarhat[b,:,:]=gammastarhat_mu
+            
+            delta2starhat_alpha=(np.tile(ni,(V,1)).T/2 + np.tile(lambdabar,(V,1)).T)
+            delta2starhat_beta=np.zeros((m,V))
+        #     pdb.set_trace()
+            for i in range(m):
+                zminusgammastarhat2 = ((data_std.loc[batches[i]].values - gammastarhat[b-1,i,:])**2).sum(axis=0)
+                delta2starhat_beta[i,:]= thetabar[i]+0.5*zminusgammastarhat2
+        #     delta2starhat[b,:,:]=dist.InverseGamma(torch.tensor(delta2starhat_alpha),torch.tensor(delta2starhat_beta)).sample()
+                delta2starhat[b,:,:]=(delta2starhat_beta)/(delta2starhat_alpha-1)
+            
+            delta2starhat_alphas[b,:,:]=delta2starhat_alpha
+            delta2starhat_betas[b,:,:]=delta2starhat_beta
+            gammastarhat_mus[b,:,:]=gammastarhat_mu
+            gammastarhat_sigmas[b,:,:]=gammastarhat_sigma
+            
+            if b % 10 == 9:
+                print(b+1, ' samples done')
+        
+        gammastarhat_final=gammastarhat[-1,:,:]
+        delta2starhat_final=delta2starhat[-1,:,:]
+        gammastarhat_mu_final=gammastarhat_mus[-1,:,:]
+        gammastarhat_sigma_final=gammastarhat_sigmas[-1,:,:]
+        delta2starhat_alpha_final=delta2starhat_alphas[-1,:,:]
+        delta2starhat_beta_final=delta2starhat_betas[-1,:,:]
+        print(delta2starhat_beta_final.shape)
+
+        gammastarhat_expanded = np.zeros((L,V))
+        
+        delta2starhat_expanded = np.zeros((L,V))
+
+        for i in range(m):
+            gammastarhat_expanded[batches[i]]=np.tile(gammastarhat_final[i,],(len(batches[i]),1))
+            delta2starhat_expanded[batches[i]]=np.tile(delta2starhat_final[i,],(len(batches[i]),1))
+
+        self.gamma_ = gammastarhat_final
+        self.delta_sq_ = delta2starhat_final
+        self.epsilon_ = epsilon
+        self.intercept_ = intercepts
+        self.coefs_x_ = X_coeffs
+
+        pdb.set_trace()
+        """end max implementation"""
         """Actual fit method."""
         # extract unique batch categories
         batches = np.unique(b)
@@ -186,11 +359,17 @@ class LongComBat(BaseDeconfound):
         self.gamma_ = gamma_star
         self.delta_sq_ = delta_sq_star
 
+        print("self.gamma_", self.gamma_.shape)
+        print("self.delta_sq_", self.delta_sq_.shape)
+        print("self.epsilon_",self.epsilon_.shape)
+        print("self.intercept_",self.intercept_.shape)
+        print("self.coefs_x_",self.coefs_x_.shape)
         return self
 
     def transform(self,
                   in_features,
                   batch,
+                  subject,
                   effects_interest=None):
         """
         Harmonise input features using an already estimated Combat model.
@@ -286,6 +465,7 @@ class LongComBat(BaseDeconfound):
     def fit_transform(self,
                       in_features,
                       batch,
+                      subject,
                       effects_interest=None):
         """
         Concatenate fit and transform operations.
@@ -300,6 +480,8 @@ class LongComBat(BaseDeconfound):
             The training input samples.
         batch : ndarray, shape (n_samples, )
             Array of batches.
+        subject : identifier for the subject (n_samples, )
+            Array of subjects
         effects_interest: ndarray, shape (n_samples, n_features_of_effects),
             optinal.
             Array of effects of interest to keep after harmonisation.
@@ -312,11 +494,13 @@ class LongComBat(BaseDeconfound):
         # Fit Combat
         self.fit(in_features=in_features,
                  batch=batch,
+                 subject=subject,
                  effects_interest=effects_interest
                  )
         # Use same data to harmonise it
         return self.transform(in_features=in_features,
                               batch=batch,
+                              subject=subject,
                               effects_interest=effects_interest)
 
     def _it_eb_param(self,

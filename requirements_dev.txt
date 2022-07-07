@@ -4,5 +4,5 @@ seaborn
 setuptools
 pytest
 pytest-runner
-statsmodels
+statsmodels==0.13.2
 scipy
