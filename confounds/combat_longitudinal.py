@@ -1,12 +1,13 @@
 import numpy as np
-
+import pdb
 from sklearn.utils.validation import (check_array, check_consistent_length,
                                       check_is_fitted, column_or_1d)
 from confounds.base import BaseDeconfound
-
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
 #"${PYTHONPATH}:/Users/maxreynolds/Desktop/ConfoundsRepo/"
 
-class ComBat(BaseDeconfound):
+class LongComBat(BaseDeconfound):
     """ComBat method to remove batch effects."""
 
     def __init__(self,
@@ -14,7 +15,7 @@ class ComBat(BaseDeconfound):
                  # adjust_variance=True, # TODO: When implmented only mean
                  tol=1e-4):
         """Initiate object."""
-        super().__init__(name='ComBat')
+        super().__init__(name='LongComBat')
         # self.parametric = True
         # self.adjust_variance = True
         self.tol = tol
@@ -22,7 +23,7 @@ class ComBat(BaseDeconfound):
     def fit(self,
             in_features,
             batch,
-            subject,
+            subject=None,
             effects_interest=None
             ):
         """
@@ -39,7 +40,8 @@ class ComBat(BaseDeconfound):
             The training input samples.
         batch : ndarray, shape (n_samples, )
             Array of batches.
-        subject : identifier for the subject
+        subject : identifier for the subject (n_samples, )
+            Array of subjects
         effects_interest: ndarray, shape (n_samples, n_features_of_effects),
             optinal.
             Array of effects of interest to keep after harmonisation.
@@ -51,22 +53,25 @@ class ComBat(BaseDeconfound):
         """
 
         in_features = check_array(in_features)
+        # pdb.set_trace()
         batch = column_or_1d(batch)
-        subject = column_or_1d(subject)
+        subject = column_or_1d(subject) if subject else None
 
         if effects_interest is not None:
             effects_interest = check_array(effects_interest)
 
         check_consistent_length([in_features,
                                  batch,
-                                 effects_interest])
+                                 effects_interest,
+                                 subject])
 
         return self._fit(Y=in_features,
                          b=batch,
-                         X=effects_interest
+                         X=effects_interest,
+                         s=subject
                          )
 
-    def _fit(self, Y, b, X):
+    def _fit(self, Y, b, X,s):
         """Actual fit method."""
         # extract unique batch categories
         batches = np.unique(b)

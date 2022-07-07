@@ -4,3 +4,5 @@ seaborn
 setuptools
 pytest
 pytest-runner
+statsmodels
+scipy
