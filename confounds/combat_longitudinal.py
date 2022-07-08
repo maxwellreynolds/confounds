@@ -1,3 +1,7 @@
+# WHere we are at: 7/7/22:
+# need to do transform, and put the subject info into self as is done with the batch info.
+# The transform should be fairly straightforward just add 
+
 import numpy as np
 import pdb
 from sklearn.utils.validation import (check_array, check_consistent_length,
@@ -56,7 +60,7 @@ class LongComBat(BaseDeconfound):
         in_features = check_array(in_features)
         # pdb.set_trace()
         batch = column_or_1d(batch)
-        pdb.set_trace()
+        # pdb.set_trace()
         subject = column_or_1d(subject)
 
         if effects_interest is not None:
@@ -75,8 +79,9 @@ class LongComBat(BaseDeconfound):
 
     def _fit(self, Y, b, X, s):
         """max implementation"""
-        b_rename=np.array(['batch_'+str(b_elem) for b_elem in b])
-
+        # b_rename=np.array(['batch_'+str(b_elem) for b_elem in b])
+        b_rename=np.array([str(b_elem) for b_elem in b])
+        s_rename=np.array([str(s_elem) for s_elem in s])
         V = Y.shape[1]
         # pdb.set_trace()
         print(V,'features')
@@ -88,6 +93,9 @@ class LongComBat(BaseDeconfound):
 
         batch = np.unique(b_rename)
         batch.sort()
+
+        subject = np.unique(s_rename)
+        
         batches = [] #index for every observation in a scanner group
 
         for b_elem in batch:
@@ -106,13 +114,14 @@ class LongComBat(BaseDeconfound):
         predicted = []
         sigma_estimates = []
         intercepts=[]
-        pdb.set_trace()
+        # pdb.set_trace()
+        eta_estimates = []
         for i in range(V):
             print(i)
             term_str=' + '.join(['x'+str(i) for i in range(X.shape[1])]+['batch'])
             formula = "{} ~ {}".format('y'+str(i),term_str)
             print(formula)
-            md = smf.mixedlm(formula, df, groups = s)
+            md = smf.mixedlm(formula, df, groups = s_rename)
             mdf = md.fit(reml = True)
             intercepts.append(mdf.fe_params.Intercept)
 
@@ -124,10 +133,15 @@ class LongComBat(BaseDeconfound):
             X_coeffs.append(X_coeff)
             predicted.append(pred)
             sigma_estimates.append(sig)
+
+            eta_estimates.append([mdf.random_effects[s_elem]['Group'] for s_elem in subject])
             
             if i % 10 == 0:
                 print(i+1, 'of', V, 'features done')
 
+        eta_estimates = np.array(eta_estimates).T
+        self.eta_estimates_ = eta_estimates
+        pdb.set_trace()
         batch_effects = np.array(batch_effects).T
         X_coeffs = np.array(X_coeffs).T
         intercepts = np.array(intercepts)
@@ -242,128 +256,129 @@ class LongComBat(BaseDeconfound):
         self.epsilon_ = epsilon
         self.intercept_ = intercepts
         self.coefs_x_ = X_coeffs
-
-        pdb.set_trace()
+        self.batches_ = batch
+        self.subjects_ = subject
+        
         """end max implementation"""
         """Actual fit method."""
-        # extract unique batch categories
-        batches = np.unique(b)
-        self.batches_ = batches
+        # # extract unique batch categories
+        # batches = np.unique(b)
+        # self.batches_ = batches
 
-        # Construct one-hot-encoding matrix for batches
-        B = np.column_stack([(b == b_name).astype(int)
-                             for b_name in self.batches_])
+        # # Construct one-hot-encoding matrix for batches
+        # B = np.column_stack([(b == b_name).astype(int)
+        #                      for b_name in self.batches_])
 
-        n_samples, n_features = Y.shape
-        n_batch = B.shape[1]
+        # n_samples, n_features = Y.shape
+        # n_batch = B.shape[1]
 
-        if n_batch == 1:
-            raise ValueError('The number of batches should be at least 2')
+        # if n_batch == 1:
+        #     raise ValueError('The number of batches should be at least 2')
 
-        sample_per_batch = B.sum(axis=0)
+        # sample_per_batch = B.sum(axis=0)
 
-        if np.any(sample_per_batch == 1):
-            raise ValueError('Each batch should have at least 2 observations'
-                             'In the future, when this does not happens,'
-                             'only mean adjustment will take place')
+        # if np.any(sample_per_batch == 1):
+        #     raise ValueError('Each batch should have at least 2 observations'
+        #                      'In the future, when this does not happens,'
+        #                      'only mean adjustment will take place')
 
-        # Construct design matrix
-        M = B.copy()
-        if isinstance(X, np.ndarray):
-            M = np.column_stack((M, X))
-            end_x = n_batch + X.shape[1]
-        else:
-            end_x = n_batch
-
-        # OLS estimation for standardization
-        beta_hat = np.matmul(np.linalg.inv(np.matmul(M.T, M)),
-                             np.matmul(M.T, Y))
-
-        # Find grand mean intercepts, from batch intercepts
-        alpha_hat = np.matmul(sample_per_batch/float(n_samples),
-                              beta_hat[:n_batch, :])
-        self.intercept_ = alpha_hat
-
-        # Find slopes for the  effects of interest
-        coefs_x = beta_hat[n_batch:end_x, :]
-        self.coefs_x_ = coefs_x
-
-        # Compute error between predictions and observed values
-        Y_hat = np.matmul(M, beta_hat)  # fitted observations
-        epsilon = np.mean(((Y - Y_hat)**2), axis=0)
-        self.epsilon_ = epsilon
-
-        # Standardise data
-        Z = Y.copy()
-        Z -= alpha_hat[np.newaxis, :]
-        Z -= np.matmul(M[:, n_batch:end_x], coefs_x)
-        Z /= np.sqrt(epsilon)
-
-        # Find gamma fitted to Standardised data
-        gamma_hat = np.matmul(np.linalg.inv(np.matmul(B.T, B)),
-                              np.matmul(B.T, Z)
-                              )
-        # Mean across input features
-        gamma_bar = np.mean(gamma_hat, axis=1)
-        # Variance across input features
-
-        if n_features > 1:
-            ddof_feat = 1
-        else:
-            raise print("Dataset with just one feature will give NaNs when "
-                        "computing the variance across features. This will "
-                        "be fixed in the feature")
-            # ddof_feat = 0
-        tau_bar_sq = np.var(gamma_hat, axis=1, ddof=ddof_feat)
-        # tau_bar_sq += 1e-10
-
-        # Variance per batch and gen
-        delta_hat_sq = [np.var(Z[B[:, ii] == 1, :], axis=0, ddof=1)
-                        for ii in range(B.shape[1])]
-        delta_hat_sq = np.array(delta_hat_sq)
-
-        # Compute inverse moments
-        lamba_bar = np.apply_along_axis(self._compute_lambda,
-                                        arr=delta_hat_sq,
-                                        axis=1,
-                                        ddof=ddof_feat)
-        thetha_bar = np.apply_along_axis(self._compute_theta,
-                                         arr=delta_hat_sq,
-                                         axis=1,
-                                         ddof=ddof_feat)
-
-        # if self.parametric: # TODO: Uncomment when implemented
-        #     it_eb = self._it_eb_param
+        # # Construct design matrix
+        # M = B.copy()
+        # if isinstance(X, np.ndarray):
+        #     M = np.column_stack((M, X))
+        #     end_x = n_batch + X.shape[1]
         # else:
-        #     it_eb = self._it_eb_non_param
+        #     end_x = n_batch
 
-        it_eb = self._it_eb_param
-        gamma_star, delta_sq_star = [], []
-        for ii in range(B.shape[1]):
-            g, d_sq = it_eb(Z[B[:, ii] == 1, :],
-                            gamma_hat[ii, :],
-                            delta_hat_sq[ii, :],
-                            gamma_bar[ii],
-                            tau_bar_sq[ii],
-                            lamba_bar[ii],
-                            thetha_bar[ii],
-                            self.tol
-                            )
+        # # OLS estimation for standardization
+        # beta_hat = np.matmul(np.linalg.inv(np.matmul(M.T, M)),
+        #                      np.matmul(M.T, Y))
 
-            gamma_star.append(g)
-            delta_sq_star.append(d_sq)
+        # # Find grand mean intercepts, from batch intercepts
+        # alpha_hat = np.matmul(sample_per_batch/float(n_samples),
+        #                       beta_hat[:n_batch, :])
+        # self.intercept_ = alpha_hat
 
-        gamma_star = np.array(gamma_star)
-        delta_sq_star = np.array(delta_sq_star)
+        # # Find slopes for the  effects of interest
+        # coefs_x = beta_hat[n_batch:end_x, :]
+        # self.coefs_x_ = coefs_x
 
-        self.gamma_ = gamma_star
-        self.delta_sq_ = delta_sq_star
+        # # Compute error between predictions and observed values
+        # Y_hat = np.matmul(M, beta_hat)  # fitted observations
+        # epsilon = np.mean(((Y - Y_hat)**2), axis=0)
+        # self.epsilon_ = epsilon
 
-        print("self.gamma_", self.gamma_.shape)
-        print("self.delta_sq_", self.delta_sq_.shape)
-        print("self.epsilon_",self.epsilon_.shape)
-        print("self.intercept_",self.intercept_.shape)
-        print("self.coefs_x_",self.coefs_x_.shape)
+        # # Standardise data
+        # Z = Y.copy()
+        # Z -= alpha_hat[np.newaxis, :]
+        # Z -= np.matmul(M[:, n_batch:end_x], coefs_x)
+        # Z /= np.sqrt(epsilon)
+
+        # # Find gamma fitted to Standardised data
+        # gamma_hat = np.matmul(np.linalg.inv(np.matmul(B.T, B)),
+        #                       np.matmul(B.T, Z)
+        #                       )
+        # # Mean across input features
+        # gamma_bar = np.mean(gamma_hat, axis=1)
+        # # Variance across input features
+
+        # if n_features > 1:
+        #     ddof_feat = 1
+        # else:
+        #     raise print("Dataset with just one feature will give NaNs when "
+        #                 "computing the variance across features. This will "
+        #                 "be fixed in the feature")
+        #     # ddof_feat = 0
+        # tau_bar_sq = np.var(gamma_hat, axis=1, ddof=ddof_feat)
+        # # tau_bar_sq += 1e-10
+
+        # # Variance per batch and gen
+        # delta_hat_sq = [np.var(Z[B[:, ii] == 1, :], axis=0, ddof=1)
+        #                 for ii in range(B.shape[1])]
+        # delta_hat_sq = np.array(delta_hat_sq)
+
+        # # Compute inverse moments
+        # lamba_bar = np.apply_along_axis(self._compute_lambda,
+        #                                 arr=delta_hat_sq,
+        #                                 axis=1,
+        #                                 ddof=ddof_feat)
+        # thetha_bar = np.apply_along_axis(self._compute_theta,
+        #                                  arr=delta_hat_sq,
+        #                                  axis=1,
+        #                                  ddof=ddof_feat)
+
+        # # if self.parametric: # TODO: Uncomment when implemented
+        # #     it_eb = self._it_eb_param
+        # # else:
+        # #     it_eb = self._it_eb_non_param
+
+        # it_eb = self._it_eb_param
+        # gamma_star, delta_sq_star = [], []
+        # for ii in range(B.shape[1]):
+        #     g, d_sq = it_eb(Z[B[:, ii] == 1, :],
+        #                     gamma_hat[ii, :],
+        #                     delta_hat_sq[ii, :],
+        #                     gamma_bar[ii],
+        #                     tau_bar_sq[ii],
+        #                     lamba_bar[ii],
+        #                     thetha_bar[ii],
+        #                     self.tol
+        #                     )
+
+        #     gamma_star.append(g)
+        #     delta_sq_star.append(d_sq)
+
+        # gamma_star = np.array(gamma_star)
+        # delta_sq_star = np.array(delta_sq_star)
+
+        # self.gamma_ = gamma_star
+        # self.delta_sq_ = delta_sq_star
+
+        # print("self.gamma_", self.gamma_.shape)
+        # print("self.delta_sq_", self.delta_sq_.shape)
+        # print("self.epsilon_",self.epsilon_.shape)
+        # print("self.intercept_",self.intercept_.shape)
+        # print("self.coefs_x_",self.coefs_x_.shape)
         return self
 
     def transform(self,
@@ -395,11 +410,19 @@ class LongComBat(BaseDeconfound):
 
         return self._transform(in_features,
                                batch,
+                               subject,
                                effects_interest)
 
-    def _transform(self, Y, b, X):
+    def _transform(self, Y, b, s, X):
+        """Max implementation"""
+        
+        
         """Actual deconfounding of the test features."""
-        test_batches = np.unique(b)
+        # test_batches = np.unique(b)
+        b_rename = np.array(str(b_elem) for b_elem in b)
+        test_batches = np.array([str(b_elem) for b_elem in np.unique(b)])
+        s_rename = np.array([str(s_elem) for s_elem in s])
+        test_subjects = np.unique(s_rename)
 
         # First standarise again the data
         Y_trans = Y - self.intercept_[np.newaxis, :]
@@ -407,14 +430,23 @@ class LongComBat(BaseDeconfound):
         if self.coefs_x_.size > 0:
             Y_trans -= np.matmul(X, self.coefs_x_)
 
+        ##Change this to subjects
+        for subject in test_subjects:
+            # pdb.set_trace()
+            ix_subject = np.where(self.subjects_ == subject)[0][0]
+            
+            Y_trans[s_rename == subject, :] -= self.eta_estimates_[ix_subject] #subject effect... then add back later
+        pdb.set_trace()
+        ##############
+
         Y_trans /= np.sqrt(self.epsilon_)
 
         for batch in test_batches:
 
             ix_batch = np.where(self.batches_ == batch)[0]
 
-            Y_trans[b == batch, :] -= self.gamma_[ix_batch]
-            Y_trans[b == batch, :] /= np.sqrt(self.delta_sq_[ix_batch, :])
+            Y_trans[b_rename == batch, :] -= self.gamma_[ix_batch]
+            Y_trans[b_rename == batch, :] /= np.sqrt(self.delta_sq_[ix_batch, :])
         Y_trans *= np.sqrt(self.epsilon_)
 
         # Add intercept
@@ -424,6 +456,12 @@ class LongComBat(BaseDeconfound):
         if self.coefs_x_.size > 0:
             Y_trans += np.matmul(X, self.coefs_x_)
 
+        for subject in test_subjects:
+            # pdb.set_trace()
+            ix_subject = np.where(self.subjects_ == subject)[0][0]
+            Y_trans[s_rename == subject, :] += self.eta_estimates_[ix_subject]
+
+        pdb.set_trace() 
         return Y_trans
 
     def _validate_for_transform(self, Y, b, X):
